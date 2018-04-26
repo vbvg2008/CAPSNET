@@ -6,10 +6,9 @@ from capsulelayers import CapsuleLayer, PrimaryCap, Length
 import os
 import argparse
 from keras import callbacks
-from keras.preprocessing.image import ImageDataGenerator
-
 
 K.set_image_data_format('channels_last')
+
 
 def CapsNet(input_shape, n_class, routings):
     """
@@ -23,10 +22,10 @@ def CapsNet(input_shape, n_class, routings):
     x = layers.Input(shape=input_shape)
 
     # Layer 1: Just a conventional Conv2D layer
-    conv1 = layers.Conv2D(filters=256, kernel_size=9, strides=4, padding='valid', activation='relu', name='conv1')(x)
+    conv1 = layers.Conv2D(filters=256, kernel_size=9, strides=1, padding='valid', activation='relu', name='conv1')(x)
 
     # Layer 2: Conv2D layer with `squash` activation, then reshape to [None, num_capsule, dim_capsule]
-    primarycaps = PrimaryCap(conv1, dim_capsule=8, n_channels=16, kernel_size=9, strides=8, padding='valid')
+    primarycaps = PrimaryCap(conv1, dim_capsule=8, n_channels=32, kernel_size=9, strides=2, padding='valid')
 
     # Layer 3: Capsule layer. Routing algorithm works here.
     digitcaps = CapsuleLayer(num_capsule=n_class, dim_capsule=16, routings=routings,
@@ -56,17 +55,17 @@ def margin_loss(y_true, y_pred):
     return K.mean(K.sum(L, 1))
 
 
-def train(model, data_dir, args):
+def train(model, data, args):
     """
     Training a CapsuleNet
     :param model: the CapsuleNet model
-    :param data_dir: the path to data directory
+    :param data: a tuple containing training and testing data, like `((x_train, y_train), (x_test, y_test))`
     :param args: arguments
     :return: The trained model
     """
-    train_dir = os.path.join(data_dir, 'train')
-    test_dir = os.path.join(data_dir, 'test')
-    
+    # unpacking the data
+    (x_train, y_train), (x_test, y_test) = data
+
     # callbacks
     log = callbacks.CSVLogger(args.save_dir + '/log.csv')
     tb = callbacks.TensorBoard(log_dir=args.save_dir + '/tensorboard-logs',
@@ -78,18 +77,10 @@ def train(model, data_dir, args):
     # compile the model
     model.compile(optimizer=optimizers.Adam(lr=args.lr), loss=margin_loss, metrics={'capsnet': 'accuracy'})
 
-    train_datagen = ImageDataGenerator(rescale=1./255)
-    test_datagen = ImageDataGenerator(rescale=1./255)
     
-    train_generator = train_datagen.flow_from_directory(train_dir, target_size=(128, 128), batch_size=100, class_mode='categorical')
-    
-    test_generator = train_datagen.flow_from_directory(test_dir, target_size=(128, 128), batch_size=100, class_mode='categorical')
-
-    
-
     # Training without data augmentation:
-    model.fit_generator(train_generator, epochs=args.epochs,
-              validation_data=test_generator, callbacks=[log, tb, checkpoint, lr_decay])
+    model.fit(x_train, y_train, batch_size=args.batch_size, epochs=args.epochs,
+              validation_data=[x_test, y_test], callbacks=[log, tb, checkpoint, lr_decay])
     
     model.save_weights(args.save_dir + '/trained_model.h5')
     print('Trained model saved to \'%s/trained_model.h5\'' % args.save_dir)
@@ -105,6 +96,21 @@ def test(model, data, args):
     y_pred = model.predict(x_test, batch_size=100)
     print('-'*10 + 'Begin: test' + '-'*10)
     print('Test acc:', np.sum(np.argmax(y_pred, 1) == np.argmax(y_test, 1))/y_test.shape[0])
+
+
+def load_mnist():
+    # the data, shuffled and split between train and test sets
+    from keras.datasets import mnist
+    (x_train, y_train), (x_test, y_test) = mnist.load_data()
+
+    x_train = x_train.reshape(-1, 28, 28, 1).astype('float32') / 255.
+    x_test = x_test.reshape(-1, 28, 28, 1).astype('float32') / 255.
+    y_train = to_categorical(y_train.astype('float32'))
+    y_test = to_categorical(y_test.astype('float32'))
+    return (x_train, y_train), (x_test, y_test)
+
+
+
 
 
 # setting the hyper parameters
@@ -133,22 +139,21 @@ print(args)
 if not os.path.exists(args.save_dir):
     os.makedirs(args.save_dir)
 
-input_shape = (128,128,3)
-n_class = 10
-data_dir = '/home/jenno/Desktop/core50_static/'
+# load data
+(x_train, y_train), (x_test, y_test) = load_mnist()
 
 # define model
-model = CapsNet(input_shape=input_shape ,n_class= n_class, routings=args.routings)
+model = CapsNet(input_shape=x_train.shape[1:],n_class=len(np.unique(np.argmax(y_train, 1))),routings=args.routings)
 model.summary()
 
 # train or test
 if args.weights is not None:  # init the model weights with provided one
     model.load_weights(args.weights)
 if not args.testing:
-    train(model, data_dir, args)
+    train(model=model, data=((x_train, y_train), (x_test, y_test)), args=args)
 else:  # as long as weights are given, will run testing
     if args.weights is None:
         print('No weights are provided.')
     else:
         print('Start testing....')
-        test(model, data_dir, args=args)
+        test(model=model, data=(x_test, y_test), args=args)
